@@ -237,7 +237,11 @@ static void _prepare_response(char *request,
 		++extension;
 		(void) strcpy(real_url, url);
 	} else {
-		(void) sprintf(real_url, "%s/"INDEX_PAGE, url);
+		if (0 == strcmp("/", url)) {
+			(void) strcpy(real_url, "/"INDEX_PAGE);
+		} else {
+			(void) sprintf(real_url, "%s/"INDEX_PAGE, url);
+		}
 		*mime_type = "text/"INDEX_EXTENSION;
 	}
 
