@@ -1,0 +1,18 @@
+     _
+ ___| |__  _   _ ___
+/ __| '_ \| | | / __|
+\__ \ | | | |_| \__ \
+|___/_| |_|\__,_|___/
+
+Overview
+========
+
+shus is a tiny HTTP server which supports only GET requests and static pages.
+
+Credits and Legal Information
+=============================
+
+shus is released into the public domain; see UNLICENSE for the license text. For
+a list of its authors and contributors, see AUTHORS.
+
+The ASCII art logo at the top was made using FIGlet (http://www.figlet.org/).
