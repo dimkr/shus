@@ -25,7 +25,7 @@
 #include "common.h"
 
 /* the usage messge */
-#define USAGE "Usage: "PACKAGE" [PORT] ROOT\n"
+#define USAGE "Usage: shusd [PORT] ROOT\n"
 
 /* the number of elements in an array */
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof(x[0]))

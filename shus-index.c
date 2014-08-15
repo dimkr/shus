@@ -9,6 +9,10 @@
 
 #include "common.h"
 
+/* the usage messge */
+#define USAGE "Usage: shus-index DIRCTORY\n"
+
+/* the index page header */
 #define HEADER \
 	"<!DOCTYPE HTML>\n" \
 	"<html>\n" \
@@ -22,6 +26,7 @@
 	"		<h1>Index of %s</h1>\n" \
 	"		<ul>\n"
 
+/* the index page footer */
 #define FOOTER \
 	"		</ul>\n" \
 	"	</body>\n" \
@@ -54,6 +59,7 @@ int main(int argc, char *argv[]) {
 
 	/* parse the command-line */
 	if (2 != argc) {
+		PRINT(USAGE);
 		goto end;
 	}
 

@@ -1,6 +1,8 @@
 #ifndef _COMMON_H_INCLUDED
 #	define _COMMON_H_INCLUDED
 
+#	include <unistd.h>
+
 /* constant string length */
 #	define STRLEN(x) (sizeof(x) - sizeof(char))
 
