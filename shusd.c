@@ -42,6 +42,9 @@
 /* the maximum size of a request */
 #define MAX_REQUEST_LENGTH (4096)
 
+/* the maximum length of a URL */
+#define MAX_URL_LENGTH (1023)
+
 /* the MIME-type of files with an unrecognized extension */
 #define FALLBACK_MIME_TYPE "application/octet-stream"
 
@@ -72,6 +75,7 @@ static const status_code_t g_status_codes[] = {
 	STATUS_CODE("404 Not Found"),
 	STATUS_CODE("411 Length Required"),
 	STATUS_CODE("413 Request Entity Too Large"),
+	STATUS_CODE("414 Request-URI Too Long"),
 	STATUS_CODE("415 Unsupported Media Type"),
 	STATUS_CODE("500 Internal Server Error"),
 	STATUS_CODE("505 HTTP Version Not Supported")
@@ -82,25 +86,28 @@ static const status_code_t g_status_codes[] = {
 #define STATUS_CODE_NOT_FOUND		&g_status_codes[2]
 #define STATUS_CODE_TOO_SMALL		&g_status_codes[3]
 #define STATUS_CODE_TOO_BIG			&g_status_codes[4]
-#define STATUS_CODE_BAD_MIME_TYPE	&g_status_codes[5]
-#define STATUS_CODE_INTERNAL_ERROR	&g_status_codes[6]
-#define STATUS_CODE_BAD_PROTOCOL	&g_status_codes[7]
+#define STATUS_CODE_URL_TOO_BIG		&g_status_codes[5]
+#define STATUS_CODE_BAD_MIME_TYPE	&g_status_codes[6]
+#define STATUS_CODE_INTERNAL_ERROR	&g_status_codes[7]
+#define STATUS_CODE_BAD_PROTOCOL	&g_status_codes[8]
 
 static const char *_get_mime_type(const char *extension) {
 	/* a loop index */
 	unsigned int i = 0;
 
 	/* find the MIME-type matching the extension */
-	for ( ; ARRAY_SIZE(g_mime_types) > i; ++i) {
-		if (0 == strcmp(g_mime_types[i].extension, extension)) {
-			return g_mime_types[i].type;
+	if (NULL != extension) {
+		for ( ; ARRAY_SIZE(g_mime_types) > i; ++i) {
+			if (0 == strcmp(g_mime_types[i].extension, extension)) {
+				return g_mime_types[i].type;
+			}
 		}
 	}
 
 	return FALLBACK_MIME_TYPE;
 }
 
-bool _get_time(char *buffer) {
+static bool _get_time(char *buffer) {
 	/* the current time, in broken-down form */
 	struct tm now_parsed = {0};
 
@@ -129,9 +136,175 @@ bool _get_time(char *buffer) {
 	return true;
 }
 
-bool _send_response(char *request, const ssize_t size, FILE *log_file) {
+static void _prepare_response(char *request,
+                              char *real_url,
+                              char **host,
+                              const char **mime_type,
+                              const status_code_t **status_code,
+                              struct stat *attributes,
+                              int *fd) {
 	/* the sent file path */
 	char path[PATH_MAX] = {'\0'};
+
+	/* the return value of snprintf() */
+	int length = 0;
+
+	/* the URL */
+	char *url = NULL;
+
+	/* the HTTP version */
+	char *protocol = NULL;
+
+	/* the request headers */
+	char *headers = NULL;
+
+	/* a line break in the headers */
+	char *line_break = NULL;
+
+	/* the file name extension */
+	const char *extension = NULL;
+
+	/* make sure the request is a GET one */
+	if (0 != strncmp(request, "GET /", STRLEN("GET /"))) {
+		*status_code = STATUS_CODE_BAD_REQUEST;
+		return;
+	}
+
+	/* locate the URL and make sure it begins with / */
+	url = request + STRLEN("GET");
+	url[0] = '\0';
+	++url;
+	if ('/' != url[0])  {
+		*status_code = STATUS_CODE_BAD_REQUEST;
+		return;
+	}
+
+	/* make sure the URL isn't too long */
+	if (MAX_URL_LENGTH <= strlen(url)) {
+		*status_code = STATUS_CODE_URL_TOO_BIG;
+		return;
+	}
+
+	/* locate the protocol */
+	protocol = strchr(url, ' ');
+	if (NULL == protocol) {
+		*status_code = STATUS_CODE_BAD_REQUEST;
+		return;
+	}
+
+	/* terminate the URL */
+	protocol[0] = '\0';
+
+	/* make sure the URL doesn't contain relative paths */
+	if (NULL != strstr(url, "./")) {
+		*status_code = STATUS_CODE_BAD_REQUEST;
+		return;
+	}
+
+	/* locate the headers */
+	headers = protocol + STRLEN("HTTP/1.1");
+
+	/* locate the "Host" header */
+	*host = strstr(headers, "\r\nHost: ");
+	if (NULL == *host) {
+		*status_code = STATUS_CODE_BAD_REQUEST;
+		return;
+	}
+	*host += STRLEN("\r\nHost: ");
+	if ('\0' == (*host)[0]) {
+		*status_code = STATUS_CODE_BAD_REQUEST;
+		return;
+	}
+
+	/* terminate the "Host" header */
+	line_break = strstr(*host, "\r\n");
+	if (NULL == line_break) {
+		*status_code = STATUS_CODE_BAD_REQUEST;
+		return;
+	}
+	line_break[0] = '\0';
+
+	/* make sure the "Host" header doesn't contain relative paths */
+	if (NULL != strstr(*host, "./")) {
+		*status_code = STATUS_CODE_BAD_REQUEST;
+		return;
+	}
+
+	/* locate the file name extension; if there's no extension, send an index
+	 * page */
+	extension = strrchr(url, '.');
+	if (NULL != extension) {
+		++extension;
+		(void) strcpy(real_url, url);
+	} else {
+		(void) sprintf(real_url, "%s/"INDEX_PAGE, url);
+		*mime_type = "text/"INDEX_EXTENSION;
+	}
+
+	/* format the page path */
+	length = snprintf(path, sizeof(path), "%s%s", *host, real_url);
+	if (sizeof(path) <= length) {
+		*status_code = STATUS_CODE_TOO_BIG;
+		return;
+	}
+	if (0 > length) {
+		*status_code = STATUS_CODE_BAD_REQUEST;
+		return;
+	}
+
+	/* get the page size and open it */
+	if (0 == stat(path, attributes)) {
+		*fd = open(path, O_RDONLY);
+		goto check_fd;
+	} else {
+		if (ENOENT != errno) {
+			*status_code = STATUS_CODE_INTERNAL_ERROR;
+			return;
+		}
+	}
+
+	/* if the URL points to a sub-directory, stop here to prevent attempts to
+	 * access other hosts */
+	if (NULL != strchr(&real_url[1], '/')) {
+		*status_code = STATUS_CODE_NOT_FOUND;
+		return;
+	}
+
+	/* try again, without the host directory */
+	if (0 == stat(real_url, attributes)) {
+		*fd = open(real_url, O_RDONLY);
+	} else {
+		if (ENOENT == errno) {
+			*status_code = STATUS_CODE_NOT_FOUND;
+			return;
+		} else {
+			*status_code = STATUS_CODE_INTERNAL_ERROR;
+			return;
+		}
+	}
+
+check_fd:
+	if (-1 != *fd) {
+		*status_code = STATUS_CODE_OK;
+	} else {
+		if (ENOENT == errno) {
+			*status_code = STATUS_CODE_NOT_FOUND;
+			return;
+		} else {
+			*status_code = STATUS_CODE_INTERNAL_ERROR;
+			return;
+		}
+	}
+
+	/* get the file MIME-type, according to the extension */
+	if (NULL == *mime_type) {
+		*mime_type = _get_mime_type(extension);
+	}
+}
+
+static bool _send_response(char *request, const ssize_t size, FILE *log_file) {
+	/* the requested URL */
+	char url[1 + MAX_URL_LENGTH] = {'\0'};
 
 	/* the sent file attributes */
 	struct stat attributes = {0};
@@ -145,35 +318,20 @@ bool _send_response(char *request, const ssize_t size, FILE *log_file) {
 	/* a file descriptor */
 	int fd = (-1);
 
-	/* the return value of snprintf() and fprintf() */
+	/* the return value of fprintf() */
 	int length = 0;
 
 	/* the return value */
 	bool result = false;
 
-	/* the sent file MIME-type */
-	const char *mime_type = NULL;
-
 	/* the status code */
 	const status_code_t *status_code = STATUS_CODE_INTERNAL_ERROR;
-
-	/* the requested URL */
-	char *url = NULL;
-
-	/* the HTTP version */
-	char *protocol = NULL;
-
-	/* the request headers */
-	char *headers = NULL;
 
 	/* the "Host" header */
 	char *host = NULL;
 
-	/* a line break in the headers */
-	char *line_break = NULL;
-
-	/* the file name extension */
-	const char *extension = NULL;
+	/* the sent file MIME-type */
+	const char *mime_type = NULL;
 
 	/* get the current time */
 	if (false == _get_time(now)) {
@@ -192,123 +350,21 @@ bool _send_response(char *request, const ssize_t size, FILE *log_file) {
 		goto send_response;
 	}
 
-	/* make sure the request is a GET one */
-	if (0 != strncmp(request, "GET /", STRLEN("GET /"))) {
-		status_code = STATUS_CODE_BAD_REQUEST;
-		goto send_response;
-	}
+	/* parse the request */
+	_prepare_response(request,
+	                  url,
+	                  &host,
+	                  &mime_type,
+	                  &status_code,
+	                  &attributes,
+	                  &fd);
 
-	/* locate the URL and make sure it begins with / */
-	url = request + STRLEN("GET");
-	url[0] = '\0';
-	++url;
-	if ('/' != url[0])  {
-		status_code = STATUS_CODE_BAD_REQUEST;
-		goto send_response;
-	}
-
-	/* locate the protocol */
-	protocol = strchr(url, ' ');
-	if (NULL == protocol) {
-		status_code = STATUS_CODE_BAD_REQUEST;
-		goto send_response;
-	}
-
-	/* terminate the URL */
-	protocol[0] = '\0';
-	++protocol;
-
-	/* make sure the URL doesn't contain relative paths */
-	if (NULL != strstr(url, "./")) {
-		status_code = STATUS_CODE_BAD_REQUEST;
-		goto send_response;
-	}
-
-	/* locate the headers */
-	headers = protocol + STRLEN("HTTP/1.1\r\n");
-	if (0 == isupper(headers[0])) {
-		status_code = STATUS_CODE_BAD_REQUEST;
-		goto send_response;
-	}
-
-	/* locate the "Host" header */
-	host = strstr(headers, "Host: ");
-	if (NULL == host) {
-		status_code = STATUS_CODE_BAD_REQUEST;
-		goto send_response;
-	}
-	host += STRLEN("Host: ");
-	if (0 == isalnum(host[0])) {
-		status_code = STATUS_CODE_BAD_REQUEST;
-		goto send_response;
-	}
-
-	/* terminate the "Host" header */
-	line_break = strstr(host, "\r\n");
-	if (NULL == line_break) {
-		status_code = STATUS_CODE_BAD_REQUEST;
-		goto send_response;
-	}
-	line_break[0] = '\0';
-
-	/* make sure the protocol is HTTP 1.0 or 1.1 */
-	if ((0 != strncmp("HTTP/1.0\r\n", protocol, STRLEN("HTTP/1.0\r\n"))) &&
-	    (0 != strncmp("HTTP/1.1\r\n", protocol, STRLEN("HTTP/1.1\r\n")))) {
-		status_code = STATUS_CODE_BAD_PROTOCOL;
-		goto send_response;
-	}
-
-	/* locate the requested file extension */
-	extension = strrchr(url, '.');
-
-	/* format the file path and obtain its MIME-type */
-	if (NULL != extension) {
-		++extension;
-		length = snprintf(path, sizeof(path), "%s%s", host, url);
-		mime_type = _get_mime_type(extension);
-	} else {
-		length = snprintf(path, sizeof(path), "%s%s/"INDEX_PAGE, host, url);
-		mime_type = _get_mime_type(INDEX_EXTENSION);
-	}
-	if (sizeof(path) <= length) {
-		status_code = STATUS_CODE_TOO_BIG;
-		goto send_response;
-	}
-	if (0 > length) {
-		status_code = STATUS_CODE_BAD_REQUEST;
-		goto send_response;
-	}
-
-	/* get the file size and open it - upon failure, do not disclose the
-	 * reason */
-	if (0 == stat(path, &attributes)) {
-		fd = open(path, O_RDONLY);
-	} else {
-		if (ENOENT == errno) {
-			if (0 == stat(url, &attributes)) {
-				fd = open(url, O_RDONLY);
-			}
-		}
-		status_code = STATUS_CODE_INTERNAL_ERROR;
-		goto send_response;
-	}
-	if (-1 != fd) {
-		status_code = STATUS_CODE_OK;
-	} else {
-		if (ENOENT == errno) {
-			status_code = STATUS_CODE_NOT_FOUND;
-		} else {
-			status_code = STATUS_CODE_INTERNAL_ERROR;
-		}
-	}
-
-send_response:
 	/* log the request details */
+	if ('\0' == url[0]) {
+		url[0] = '?';
+	}
 	if (NULL == host) {
 		host = "?";
-	}
-	if (NULL == url) {
-		url = "?";
 	}
 	if ('\0' != now[0]) {
 		length = fprintf(log_file,
@@ -328,6 +384,7 @@ send_response:
 		result = true;
 	}
 
+send_response:
 	/* send mandatory headers common to all response types */
 	if (0 > printf("HTTP/1.1 %s\r\n" \
 	               "Connection: close\r\n" \
