@@ -279,16 +279,19 @@ bool _send_response(char *request, const ssize_t size, FILE *log_file) {
 		goto send_response;
 	}
 
-	/* get the file size - upon failure, do not disclose why this failed */
-	if (-1 == stat(path, &attributes)) {
+	/* get the file size and open it - upon failure, do not disclose the
+	 * reason */
+	if (0 == stat(path, &attributes)) {
+		fd = open(path, O_RDONLY);
+	} else {
 		if (ENOENT == errno) {
-			status_code = STATUS_CODE_NOT_FOUND;
+			if (0 == stat(url, &attributes)) {
+				fd = open(url, O_RDONLY);
+			}
 		}
+		status_code = STATUS_CODE_INTERNAL_ERROR;
 		goto send_response;
 	}
-
-	/* open the file */
-	fd = open(path, O_RDONLY);
 	if (-1 != fd) {
 		status_code = STATUS_CODE_OK;
 	} else {
