@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <paths.h>
 #include <assert.h>
+#include <pwd.h>
 
 #include "common.h"
 
@@ -61,7 +62,8 @@ typedef struct {
 static const mime_type_t g_mime_types[] = {
 	{ "html", "text/html" },
 	{ "css", "text/css" },
-	{ "png", "image/png" }
+	{ "png", "image/png" },
+	{ "txt", "text/plain" }
 };
 
 static const status_code_t g_status_codes[] = {
@@ -222,12 +224,6 @@ bool _send_response(char *request, const ssize_t size, FILE *log_file) {
 		goto send_response;
 	}
 
-	/* make sure the protocol is HTTP 1.1 */
-	if (0 != strncmp("HTTP/1.1\r\n", protocol, STRLEN("HTTP/1.1\r\n"))) {
-		status_code = STATUS_CODE_BAD_PROTOCOL;
-		goto send_response;
-	}
-
 	/* locate the headers */
 	headers = protocol + STRLEN("HTTP/1.1\r\n");
 	if (0 == isupper(headers[0])) {
@@ -254,6 +250,13 @@ bool _send_response(char *request, const ssize_t size, FILE *log_file) {
 		goto send_response;
 	}
 	line_break[0] = '\0';
+
+	/* make sure the protocol is HTTP 1.0 or 1.1 */
+	if ((0 != strncmp("HTTP/1.0\r\n", protocol, STRLEN("HTTP/1.0\r\n"))) &&
+	    (0 != strncmp("HTTP/1.1\r\n", protocol, STRLEN("HTTP/1.1\r\n")))) {
+		status_code = STATUS_CODE_BAD_PROTOCOL;
+		goto send_response;
+	}
 
 	/* locate the requested file extension */
 	extension = strrchr(url, '.');
@@ -435,10 +438,13 @@ int main(int argc, char *argv[]) {
 	/* the server root directory */
 	const char *root = NULL;
 
+	/* the process owner */
+	struct passwd *owner = NULL;
+
 	/* parse the command-line */
 	switch (argc) {
 		case 2:
-			port = "http";
+			port = "80";
 			root = argv[1];
 			break;
 
@@ -469,6 +475,12 @@ int main(int argc, char *argv[]) {
 		goto end;
 	}
 	if (-1 == sigprocmask(SIG_SETMASK, &signal_mask, NULL)) {
+		goto end;
+	}
+
+	/* get the process owner UID */
+	owner = getpwnam(USER);
+	if (NULL == owner) {
 		goto end;
 	}
 
@@ -609,6 +621,14 @@ int main(int argc, char *argv[]) {
 	}
 	if (-1 == chdir("/")) {
 		goto close_log;
+	}
+
+	/* change the process owner */
+	if (-1 == setuid(owner->pw_uid)) {
+		goto end;
+	}
+	if (-1 == seteuid(owner->pw_uid)) {
+		goto end;
 	}
 
 	/* disable printf() buffering, to ensure the child process output is written

@@ -7,6 +7,7 @@ SBIN_DIR ?= /sbin
 MAN_DIR ?= /usr/share/man
 DOC_DIR ?= /usr/share/doc
 LOG_DIR ?= /var/log
+USER ?= nobody
 
 PACKAGE = shus
 VERSION = 0.1
@@ -15,6 +16,7 @@ CFLAGS += -std=gnu99 -Wall -pedantic \
           -DNDEBUG \
           -DPACKAGE=\"$(PACKAGE)\" \
           -DVERSION=\"$(VERSION)\" \
+          -DUSER=\"$(USER)\" \
           -DLOG_PATH=\"$(LOG_DIR)/$(PACKAGE).log\"
 
 INSTALL = install -v
