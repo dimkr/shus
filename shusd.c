@@ -710,10 +710,16 @@ int main(int argc, char *argv[]) {
 
 			case SIGCHLD:
 				/* if a child process exited with an error code, stop */
-				if (pid != waitpid(received_signal.si_pid, &status, WNOHANG)) {
-					if (EXIT_SUCCESS != WEXITSTATUS(status)) {
-						goto close_log;
-					}
+				if (received_signal.si_pid != waitpid(received_signal.si_pid,
+				                                      &status,
+				                                      WNOHANG)) {
+					goto close_log;
+				}
+				if (!(WIFEXITED(status))) {
+					continue;
+				}
+				if (EXIT_SUCCESS != WEXITSTATUS(status)) {
+					goto close_log;
 				}
 				break;
 
