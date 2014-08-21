@@ -8,6 +8,7 @@ MAN_DIR ?= /usr/share/man
 DOC_DIR ?= /usr/share/doc
 LOG_DIR ?= /var/log
 USER ?= nobody
+PORT ?= http
 
 PACKAGE = shus
 VERSION = 0.1
@@ -17,6 +18,7 @@ CFLAGS += -std=gnu99 -Wall -pedantic \
           -DPACKAGE=\"$(PACKAGE)\" \
           -DVERSION=\"$(VERSION)\" \
           -DUSER=\"$(USER)\" \
+          -DPORT=\"$(PORT)\" \
           -DLOG_PATH=\"$(LOG_DIR)/$(PACKAGE).log\"
 
 INSTALL = install -v

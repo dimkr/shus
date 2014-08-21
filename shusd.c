@@ -13,6 +13,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <arpa/inet.h>
 #include <netdb.h>
 #include <signal.h>
 #include <ctype.h>
@@ -107,7 +108,7 @@ static const char *_get_mime_type(const char *extension) {
 	return FALLBACK_MIME_TYPE;
 }
 
-static bool _get_time(char *buffer) {
+static bool _get_time(char *buffer, const size_t size) {
 	/* the current time, in broken-down form */
 	struct tm now_parsed = {0};
 
@@ -124,7 +125,7 @@ static bool _get_time(char *buffer) {
     }
 
     /* convert the current time to a string */
-	if (NULL == asctime_r(&now_parsed, buffer)) {
+	if (0 == strftime(buffer, size, "%y/%m/%d %H:%M:%S", &now_parsed)) {
 		return false;
 	}
 
@@ -306,7 +307,10 @@ check_fd:
 	}
 }
 
-static bool _send_response(char *request, const ssize_t size, FILE *log_file) {
+static bool _send_response(char *request,
+                           const ssize_t size,
+                           FILE *log_file,
+                           const char *client_address) {
 	/* the requested URL */
 	char url[1 + MAX_URL_LENGTH] = {'\0'};
 
@@ -314,7 +318,7 @@ static bool _send_response(char *request, const ssize_t size, FILE *log_file) {
 	struct stat attributes = {0};
 
 	/* the current time */
-	char now[26] = {'\0'};
+	char now[1 + STRLEN("xx/xx/xx xx:xx:xx")] = {'\0'};
 
 	/* the offset passed to sendfile() */
 	off_t offset = 0;
@@ -326,7 +330,7 @@ static bool _send_response(char *request, const ssize_t size, FILE *log_file) {
 	int length = 0;
 
 	/* the return value */
-	bool result = false;
+	bool result = true;
 
 	/* the status code */
 	const status_code_t *status_code = STATUS_CODE_INTERNAL_ERROR;
@@ -338,7 +342,8 @@ static bool _send_response(char *request, const ssize_t size, FILE *log_file) {
 	const char *mime_type = NULL;
 
 	/* get the current time */
-	if (false == _get_time(now)) {
+	if (false == _get_time(now, sizeof(now))) {
+		result = false;
 		goto send_response;
 	}
 
@@ -363,43 +368,20 @@ static bool _send_response(char *request, const ssize_t size, FILE *log_file) {
 	                  &attributes,
 	                  &fd);
 
-	/* log the request details */
-	if ('\0' == url[0]) {
-		url[0] = '?';
-	}
-	if (NULL == host) {
-		host = "?";
-	}
-	if ('\0' != now[0]) {
-		length = fprintf(log_file,
-		                 "[%s] GET %s %s -> %s\n",
-		                 now,
-		                 host,
-		                 url,
-		                 status_code->text);
-	} else {
-		length = fprintf(log_file,
-		                 "[?] GET %s%s -> %s\n",
-		                 host,
-		                 url,
-		                 status_code->text);
-	}
-	if (0 < length) {
-		result = true;
-	}
-
 send_response:
 	/* send mandatory headers common to all response types */
 	if (0 > printf("HTTP/1.1 %s\r\n" \
 	               "Connection: close\r\n" \
 	               "Server: "SERVER_BANNER"\r\n",
 	               status_code->text)) {
+		result = false;
 		goto close_file;
 	}
 
 	/* if the date was retrieved successfully, send it */
 	if ('\0' != now[0]) {
 		if (0 > printf("Date: %s\r\n", now)) {
+			result = false;
 			goto close_file;
 		}
 	}
@@ -411,15 +393,15 @@ send_response:
 		               "\r\n",
 		               (size_t) attributes.st_size,
 		               mime_type)) {
-			goto close_file;
-		}
-
-		if ((ssize_t) attributes.st_size != sendfile(
-		                                         STDOUT_FILENO,
-		                                         fd,
-		                                         &offset,
-		                                         (size_t) attributes.st_size)) {
-			goto close_file;
+			result = false;
+		} else {
+			if ((ssize_t) attributes.st_size != sendfile(
+			                                     STDOUT_FILENO,
+			                                     fd,
+			                                     &offset,
+			                                     (size_t) attributes.st_size)) {
+				result = false;
+			}
 		}
 	} else {
 		/* otherwise, send the status code as the response content */
@@ -428,7 +410,7 @@ send_response:
 		               "%s",
 		               status_code->length,
 		               status_code->text)) {
-			goto close_file;
+			result = false;
 		}
 	}
 
@@ -438,12 +420,45 @@ close_file:
 		(void) close(fd);
 	}
 
+	/* disconnect the client */
+	(void) fclose(stdout);
+
+	/* log the request details */
+	if ('\0' == url[0]) {
+		url[0] = '?';
+	}
+	if (NULL == host) {
+		host = "?";
+	}
+	if ('\0' != now[0]) {
+		length = fprintf(log_file,
+		                 "[%s] %s GET %s %s -> %s\n",
+		                 now,
+		                 client_address,
+		                 host,
+		                 url,
+		                 status_code->text);
+	} else {
+		length = fprintf(log_file,
+		                 "[?] %s GET %s%s -> %s\n",
+		                 client_address,
+		                 host,
+		                 url,
+		                 status_code->text);
+	}
+	if (0 >= length) {
+		result = false;
+	}
+
 	return result;
 }
 
 int main(int argc, char *argv[]) {
 	/* a raw request */
 	char request[MAX_REQUEST_LENGTH] = {'\0'};
+
+	/* the client address, in textual form */
+	char client_address_textual[INET6_ADDRSTRLEN] = {'\0'};
 
 	/* resolving hints for getaddrinfo() */
 	struct addrinfo hints = {0};
@@ -508,7 +523,7 @@ int main(int argc, char *argv[]) {
 	/* parse the command-line */
 	switch (argc) {
 		case 2:
-			port = "80";
+			port = PORT;
 			root = argv[1];
 			break;
 
@@ -732,10 +747,38 @@ int main(int argc, char *argv[]) {
 		/* accept a client */
 		client = accept(listening_socket, &client_address, &address_size);
 		if (-1 == client) {
-			if ((EAGAIN == errno) || (ECONNABORTED == errno)) {
+			if ((EAGAIN == errno) ||
+			    (EWOULDBLOCK == errno) ||
+			    (ECONNABORTED == errno)) {
 				continue;
 			}
 			goto close_log;
+		}
+
+		/* convert the client address to textual form */
+		switch (client_address.sa_family) {
+			case AF_INET6:
+				if (NULL == inet_ntop(
+					       AF_INET6,
+					       &(((struct sockaddr_in6*) &client_address)->sin6_addr),
+					       client_address_textual,
+					       sizeof(client_address_textual))) {
+					goto disconnect_client;
+				}
+				break;
+
+			case AF_INET:
+				if (NULL == inet_ntop(
+					         AF_INET,
+					         &(((struct sockaddr_in*) &client_address)->sin_addr),
+					         client_address_textual,
+					         sizeof(client_address_textual))) {
+					goto disconnect_client;
+				}
+				break;
+
+			default:
+				goto disconnect_client;
 		}
 
 		/* enable the TCP_CORK flag, to make the response more efficient */
@@ -745,6 +788,7 @@ int main(int argc, char *argv[]) {
 		                     TCP_CORK,
 		                     (void *) &one,
 		                     sizeof(one))) {
+			(void) close(client);
 			goto close_socket;
 		}
 
@@ -752,6 +796,7 @@ int main(int argc, char *argv[]) {
 		pid = fork();
 		switch (pid) {
 			case (-1):
+				(void) close(client);
 				goto close_log;
 
 			case 0:
@@ -764,11 +809,9 @@ int main(int argc, char *argv[]) {
 				                    (void *) request,
 				                    sizeof(request),
 				                    0);
-				switch (request_size) {
-					case (-1):
-					case 0:
-						exit_code = EXIT_SUCCESS;
-						goto terminate;
+				if (0 >= request_size) {
+					exit_code = EXIT_SUCCESS;
+					goto terminate;
 				}
 
 				/* close the standard output pipe */
@@ -787,7 +830,10 @@ int main(int argc, char *argv[]) {
 				request[request_size] = '\0';
 
 				/* respond to it */
-				if (true == _send_response(request, request_size, log_file)) {
+				if (true == _send_response(request,
+				                           request_size,
+				                           log_file,
+				                           client_address_textual)) {
 					exit_code = EXIT_SUCCESS;
 				}
 
@@ -799,11 +845,11 @@ terminate:
 				(void) fclose(log_file);
 
 				exit(exit_code);
-
-			default:
-				/* close the client socket */
-				(void) close(client);
 		}
+
+disconnect_client:
+		/* close the client socket */
+		(void) close(client);
 	} while (1);
 
 success:
