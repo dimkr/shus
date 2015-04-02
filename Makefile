@@ -13,9 +13,12 @@ USER ?= nobody
 CFLAGS += -std=gnu99 \
           -Wall \
           -pedantic \
+          -pthread \
           -D_GNU_SOURCE \
           -DNDEBUG \
           -DUSER=\"$(USER)\"
+LDFLAGS += -pthread
+LIBS += -lrt
 
 INSTALL = install -v
 

@@ -41,6 +41,8 @@
 #include <netdb.h>
 #include <magic.h>
 #include <sys/sendfile.h>
+#include <sys/mman.h>
+#include <semaphore.h>
 #include <errno.h>
 #include <assert.h>
 #include <paths.h>
@@ -49,9 +51,13 @@
 
 #define USAGE "Usage: %s [SERVICE] DIR\n"
 #define BACKLOG (256)
+#define HANDLER_MAX (128)
+#define SEMAPHORE_NAME "/shusd.sem"
+#define RECV_TIMEOUT (20)
 
 __attribute__((nonnull(1)))
-static bool get_time(char *buf, const size_t len) {
+static bool get_time(char *buf, const size_t len)
+{
 	struct tm tm;
 	time_t now;
 
@@ -285,9 +291,10 @@ static bool log_req(const struct sockaddr *peer, const char *url)
 	return true;
 }
 
-__attribute__((nonnull(2, 4)))
+__attribute__((nonnull(1, 3, 5)))
 __attribute__((noreturn))
-static void handle_conn(const int conn,
+static void handle_conn(sem_t *sem,
+                        const int conn,
                         const struct sockaddr *peer,
                         const magic_t mag,
                         const char *root,
@@ -299,7 +306,7 @@ static void handle_conn(const int conn,
 	const char *url = NULL;
 	const char *type = "application/octet-stream";
 	char *pos;
-	FILE *fh;
+	FILE *fh = NULL;
 	ssize_t len;
 	int out;
 	int ret = EXIT_FAILURE;
@@ -316,21 +323,25 @@ static void handle_conn(const int conn,
 	if (-1 == seteuid(uid))
 		goto close_fd;
 
+	/* lock the semaphore */
+	if (-1 == sem_wait(sem))
+		goto close_fd;
+
 	/* receive the request */
 	len = recv(conn, (void *) req, sizeof(req) - 1, 0);
 	if (0 >= len)
-		goto close_fd;
+		goto unlock;
 	req[len] = '\0';
 
 	/* check the request type */
 	if (0 != strncmp("GET ", req, 4))
-		goto close_fd;
+		goto unlock;
 
 	/* locate and terminate the URL */
 	url = &req[5];
 	pos = strchr(url, ' ');
 	if (NULL == pos)
-		goto close_fd;
+		goto unlock;
 	pos[0] = '\0';
 
 	/* do not allow relative paths in the URL */
@@ -340,23 +351,23 @@ static void handle_conn(const int conn,
 	/* format the file path */
 	out = snprintf(path, sizeof(path), "./%s", url);
 	if ((0 >= len) || (sizeof(path) <= out))
-		goto close_fd;
+		goto unlock;
 
 	/* get the file type and size */
 	if (-1 == stat(path, &stbuf))
-		goto close_fd;
+		goto unlock;
 
 	/* if it's a regular file, guess its type */
 	if (!S_ISDIR(stbuf.st_mode)) {
 		type = magic_file(mag, path);
 		if (NULL == type)
-			goto close_fd;
+			goto unlock;
 	}
 
 	/* wrap the socket with a stdio stream */
 	fh = fdopen(conn, "w");
 	if (NULL == fh)
-		goto close_fd;
+		goto unlock;
 
 	/* disable buffering, since we use TCP_CORK */
 	setbuf(fh, NULL);
@@ -374,12 +385,15 @@ static void handle_conn(const int conn,
 
 close_fh:
 	(void) fclose(fh);
-	goto log_url;
+	fh = NULL;
+
+unlock:
+	(void) sem_post(sem);
 
 close_fd:
-	(void) close(conn);
+	if (NULL == fh)
+		(void) close(conn);
 
-log_url:
 	log_req(peer, url);
 
 	exit(ret);
@@ -456,8 +470,10 @@ int main(int argc, char *argv[])
 	struct sigaction act;
 	struct addrinfo hints;
 	struct sockaddr peer;
+	struct timeval timeout;
 	sigset_t mask;
 	magic_t mag;
+	sem_t *sem;
 	const char *service;
 	const char *root;
 	struct addrinfo *addrs;
@@ -465,6 +481,7 @@ int main(int argc, char *argv[])
 	pid_t pid;
 	socklen_t len;
 	int ret = EXIT_FAILURE;
+	int shm;
 	int fd;
 	int conn;
 	int rtsig;
@@ -532,10 +549,30 @@ int main(int argc, char *argv[])
 	if (-1 == magic_load(mag, NULL))
 		goto close_mag;
 
+	/* create a shared memory region */
+	shm = shm_open(SEMAPHORE_NAME,
+	               O_RDWR | O_CREAT | O_EXCL | O_TRUNC,
+	               S_IRUSR | S_IWUSR);
+	if (-1 == shm)
+		goto close_mag;
+
+	sem = (sem_t *) mmap(NULL,
+	                     sizeof(sem_t),
+	                     PROT_READ | PROT_WRITE,
+	                     MAP_SHARED | MAP_ANONYMOUS,
+	                     shm,
+	                     0);
+	if (MAP_FAILED == sem)
+		goto free_shm;
+
+	/* initialize a process-shared semaphore inside it */
+	if (-1 == sem_init(sem, 1, HANDLER_MAX))
+		goto unmap_shm;
+
 	/* create a listening socket */
 	fd = socket(addrs->ai_family, addrs->ai_socktype, addrs->ai_protocol);
 	if (-1 == fd)
-		goto close_mag;
+		goto destroy_sem;
 
 	/* make it possible to listen on the same address again */
 	one = 1;
@@ -546,6 +583,7 @@ int main(int argc, char *argv[])
 	                     sizeof(one)))
 		goto close_fd;
 
+	/* start listening */
 	if (-1 == bind(fd, addrs->ai_addr, addrs->ai_addrlen))
 		goto close_fd;
 
@@ -580,7 +618,7 @@ int main(int argc, char *argv[])
 			case SIGTERM:
 			case SIGINT:
 				ret = EXIT_SUCCESS;
-				break;
+				goto close_log;
 
 			default:
 				if (rtsig != sig.si_signo)
@@ -591,6 +629,16 @@ int main(int argc, char *argv[])
 		conn = accept(fd, &peer, &len);
 		if (-1 == conn)
 			break;
+
+		/* enable receive timeout */
+		timeout.tv_sec = RECV_TIMEOUT;
+		timeout.tv_usec = 0;
+		if (-1 == setsockopt(conn,
+		                     SOL_SOCKET,
+		                     SO_RCVTIMEO,
+		                     (void *) &timeout,
+		                     sizeof(timeout)))
+			goto disconnect;
 
 		/* enable the TCP_CORK flag, to improve efficiency */
 		one = 1;
@@ -610,7 +658,7 @@ int main(int argc, char *argv[])
 				break;
 
 			case 0:
-				handle_conn(conn, &peer, mag, root, user->pw_uid);
+				handle_conn(sem, conn, &peer, mag, root, user->pw_uid);
 		}
 
 disconnect:
@@ -622,6 +670,15 @@ close_log:
 
 close_fd:
 	(void) close(fd);
+
+destroy_sem:
+	(void) sem_destroy(sem);
+
+unmap_shm:
+	(void) munmap((void *) sem, sizeof(sem_t));
+
+free_shm:
+	(void) shm_unlink(SEMAPHORE_NAME);
 
 close_mag:
 	magic_close(mag);
