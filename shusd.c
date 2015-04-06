@@ -54,6 +54,7 @@
 #define HANDLER_MAX (128)
 #define SEMAPHORE_NAME "/shusd.sem"
 #define RECV_TIMEOUT (20)
+#define SEND_TIMEOUT (45 * 60)
 
 __attribute__((nonnull(1)))
 static bool get_time(char *buf, const size_t len)
@@ -630,12 +631,22 @@ int main(int argc, char *argv[])
 		if (-1 == conn)
 			break;
 
-		/* enable receive timeout */
+		/* enable recv() timeout */
 		timeout.tv_sec = RECV_TIMEOUT;
 		timeout.tv_usec = 0;
 		if (-1 == setsockopt(conn,
 		                     SOL_SOCKET,
 		                     SO_RCVTIMEO,
+		                     (void *) &timeout,
+		                     sizeof(timeout)))
+			goto disconnect;
+
+		/* enable send() timeout */
+		timeout.tv_sec = SEND_TIMEOUT;
+		timeout.tv_usec = 0;
+		if (-1 == setsockopt(conn,
+		                     SOL_SOCKET,
+		                     SO_SNDTIMEO,
 		                     (void *) &timeout,
 		                     sizeof(timeout)))
 			goto disconnect;
