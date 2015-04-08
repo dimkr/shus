@@ -55,6 +55,8 @@
 #define SEMAPHORE_NAME "/shusd.sem"
 #define RECV_TIMEOUT (20)
 #define SEND_TIMEOUT (45 * 60)
+#define RAND_BUF_MIN_LEN (1024)
+#define RAND_BUF_MAX_LEN (4096)
 
 __attribute__((nonnull(1)))
 static bool get_time(char *buf, const size_t len)
@@ -127,6 +129,11 @@ static bool send_file(FILE *fh,
 	if (false == send_hdrs(fh, "200 OK", len, type))
 		goto end;
 
+	if (0 == len) {
+		ret = true;
+		goto end;
+	}
+
 	in = open(path, O_RDONLY);
 	if (-1 == in)
 		goto end;
@@ -191,31 +198,7 @@ static bool send_index(FILE *fh, const char *url, const char *path)
 	if (false == send_hdrs(fh, "200 OK", 0, "text/html"))
 		goto end;
 
-	if ('\0' != url[0]) {
-		if (0 >= fprintf(fh,
-		                 "<!DOCTYPE HTML>\n" \
-		                 "<html>\n" \
-		                 "\t<head>\n" \
-		                 "\t\t<meta charset=\"UTF-8\">\n" \
-		                 "\t\t<title>Index of /%s</title>\n" \
-		                 "\t</head>\n" \
-		                 "\t<body>\n" \
-		                 "\t\t<h1>Index of /%s</h1>\n" \
-		                 "\t\t<ul>\n",
-		                 url,
-		                 url))
-			goto free_ents;
-
-		for (i = 0; out > i; ++i) {
-			if (0 >= fprintf(fh,
-			                 "\t\t\t<li><a href=\"/%s/%s\">%s</a></li>\n",
-			                 url,
-			                 ents[i]->d_name,
-			                 ents[i]->d_name))
-				goto free_ents;
-		}
-	}
-	else {
+	if (0 == strcmp("/", url)) {
 		if (0 >= fputs("<!DOCTYPE HTML>\n" \
 		               "<html>\n"
 		               "\t<head>\n"
@@ -231,6 +214,30 @@ static bool send_index(FILE *fh, const char *url, const char *path)
 		for (i = 0; out > i; ++i) {
 			if (0 >= fprintf(fh,
 			                 "\t\t\t<li><a href=\"/%s\">%s</a></li>\n",
+			                 ents[i]->d_name,
+			                 ents[i]->d_name))
+				goto free_ents;
+		}
+	}
+	else {
+		if (0 >= fprintf(fh,
+		                 "<!DOCTYPE HTML>\n" \
+		                 "<html>\n" \
+		                 "\t<head>\n" \
+		                 "\t\t<meta charset=\"UTF-8\">\n" \
+		                 "\t\t<title>Index of %s</title>\n" \
+		                 "\t</head>\n" \
+		                 "\t<body>\n" \
+		                 "\t\t<h1>Index of %s</h1>\n" \
+		                 "\t\t<ul>\n",
+		                 url,
+		                 url))
+			goto free_ents;
+
+		for (i = 0; out > i; ++i) {
+			if (0 >= fprintf(fh,
+			                 "\t\t\t<li><a href=\"%s/%s\">%s</a></li>\n",
+			                 url,
 			                 ents[i]->d_name,
 			                 ents[i]->d_name))
 				goto free_ents;
@@ -252,6 +259,25 @@ free_ents:
 
 end:
 	return ret;
+}
+
+__attribute__((nonnull(1)))
+static void send_random(FILE *fh)
+{
+	unsigned char buf[RAND_BUF_MAX_LEN];
+	unsigned int seed;
+	int len;
+	int i;
+
+	seed = (unsigned int) time(NULL);
+
+	len = RAND_BUF_MIN_LEN + \
+	      (rand_r(&seed) % (1 + RAND_BUF_MAX_LEN - RAND_BUF_MIN_LEN));
+
+	for (i = 0; len > i; ++i)
+		buf[i] = (unsigned char) rand_r(&seed) % UCHAR_MAX;
+
+	(void) fwrite((void *) buf, (size_t) len, 1, fh);
 }
 
 __attribute__((nonnull(1, 2)))
@@ -301,7 +327,6 @@ static void handle_conn(sem_t *sem,
                         const char *root,
                         const uid_t uid)
 {
-	char path[PATH_MAX];
 	char req[BUFSIZ];
 	struct stat stbuf;
 	const char *url = NULL;
@@ -309,8 +334,8 @@ static void handle_conn(sem_t *sem,
 	char *pos;
 	FILE *fh = NULL;
 	ssize_t len;
-	int out;
 	int ret = EXIT_FAILURE;
+	bool res;
 
 	/* change the working directory */
 	if (-1 == chroot(root))
@@ -324,9 +349,14 @@ static void handle_conn(sem_t *sem,
 	if (-1 == seteuid(uid))
 		goto close_fd;
 
+	/* wrap the socket with a stdio stream */
+	fh = fdopen(conn, "w");
+	if (NULL == fh)
+		goto close_fd;
+
 	/* lock the semaphore */
 	if (-1 == sem_wait(sem))
-		goto close_fd;
+		goto close_fh;
 
 	/* receive the request */
 	len = recv(conn, (void *) req, sizeof(req) - 1, 0);
@@ -336,60 +366,60 @@ static void handle_conn(sem_t *sem,
 
 	/* check the request type */
 	if (0 != strncmp("GET ", req, 4))
-		goto unlock;
+		goto punish;
 
 	/* locate and terminate the URL */
-	url = &req[5];
+	if ('\0' == req[4])
+		goto punish;
+	url = &req[4];
 	pos = strchr(url, ' ');
 	if (NULL == pos)
-		goto unlock;
+		goto punish;
 	pos[0] = '\0';
+
+	/* do not allow URLs that do not begin with / */
+	if ('/' != url[0])
+		goto punish;
 
 	/* do not allow relative paths in the URL */
 	if (NULL != strstr(url, "./"))
-		goto close_fd;
-
-	/* format the file path */
-	out = snprintf(path, sizeof(path), "./%s", url);
-	if ((0 >= len) || (sizeof(path) <= out))
-		goto unlock;
+		goto punish;
 
 	/* get the file type and size */
-	if (-1 == stat(path, &stbuf))
+	if (-1 == stat(url, &stbuf)) {
+		if (ENAMETOOLONG == errno)
+			goto punish;
 		goto unlock;
+	}
 
 	/* if it's a regular file, guess its type */
 	if (!S_ISDIR(stbuf.st_mode)) {
-		type = magic_file(mag, path);
+		type = magic_file(mag, url);
 		if (NULL == type)
 			goto unlock;
 	}
 
-	/* wrap the socket with a stdio stream */
-	fh = fdopen(conn, "w");
-	if (NULL == fh)
-		goto unlock;
-
 	/* disable buffering, since we use TCP_CORK */
 	setbuf(fh, NULL);
 
-	if (S_ISDIR(stbuf.st_mode)) {
-		if (false == send_index(fh, url, path))
-			goto close_fh;
-	}
-	else {
-		if (false == send_file(fh, (size_t) stbuf.st_size, type, path))
-			goto close_fh;
-	}
+	if (S_ISDIR(stbuf.st_mode))
+		res = send_index(fh, url, url);
+	else
+		res = send_file(fh, (size_t) stbuf.st_size, type, url);
 
-	ret = EXIT_SUCCESS;
+	if (true == res)
+		ret = EXIT_SUCCESS;
 
-close_fh:
-	(void) fclose(fh);
-	fh = NULL;
+	goto unlock;
+
+punish:
+	send_random(fh);
 
 unlock:
 	(void) sem_post(sem);
+
+close_fh:
+	(void) fclose(fh);
 
 close_fd:
 	if (NULL == fh)
