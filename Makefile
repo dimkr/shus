@@ -39,7 +39,7 @@ install: all
 	$(INSTALL) -D -m 644 shusd.8 $(DESTDIR)/$(MAN_DIR)/man8/shusd.8
 	$(INSTALL) -D -m 644 README $(DESTDIR)/$(DOC_DIR)/shus/README
 	$(INSTALL) -m 644 AUTHORS $(DESTDIR)/$(DOC_DIR)/shus/AUTHORS
-	$(INSTALL) -m 644 COPYING $(DESTDIR)/$(DOC_DIR)/shus/UNLICENSE
+	$(INSTALL) -m 644 COPYING $(DESTDIR)/$(DOC_DIR)/shus/COPYING
 
 clean:
 	rm -f shusd $(OBJECTS)
