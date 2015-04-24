@@ -318,6 +318,25 @@ static bool log_req(const struct sockaddr *peer, const char *url)
 	return true;
 }
 
+__attribute__((nonnull(2)))
+static const char *get_type(const magic_t mag, const char *url)
+{
+	const char *ext;
+
+	ext = strrchr(url, '.');
+	if (NULL != ext) {
+		++ext;
+
+		if (0 == strcmp("css", ext))
+			return "text/css";
+
+		if (0 == strcmp("js", ext))
+			return "text/javascript";
+	}
+
+	return magic_file(mag, url);
+}
+
 __attribute__((nonnull(1, 3, 5)))
 __attribute__((noreturn))
 static void handle_conn(sem_t *sem,
@@ -394,7 +413,7 @@ static void handle_conn(sem_t *sem,
 
 	/* if it's a regular file, guess its type */
 	if (!S_ISDIR(stbuf.st_mode)) {
-		type = magic_file(mag, url);
+		type = get_type(mag, url);
 		if (NULL == type)
 			goto unlock;
 	}
