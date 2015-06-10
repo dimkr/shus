@@ -50,8 +50,8 @@
 #include <syslog.h>
 
 #define USAGE "Usage: %s [SERVICE] DIR\n"
-#define BACKLOG (256)
 #define HANDLER_MAX (128)
+#define BACKLOG (2 * HANDLER_MAX)
 #define SEMAPHORE_NAME "/shusd.sem"
 #define RECV_TIMEOUT (20)
 #define SEND_TIMEOUT (45 * 60)
@@ -269,13 +269,14 @@ static void send_random(FILE *fh)
 	int len;
 	int i;
 
+	/* pick a random buffer size */
 	seed = (unsigned int) time(NULL);
-
 	len = RAND_BUF_MIN_LEN + \
 	      (rand_r(&seed) % (1 + RAND_BUF_MAX_LEN - RAND_BUF_MIN_LEN));
 
+	/* generate random data */
 	for (i = 0; len > i; ++i)
-		buf[i] = (unsigned char) rand_r(&seed) % UCHAR_MAX;
+		buf[i] = (unsigned char) (rand_r(&seed) % UCHAR_MAX);
 
 	(void) fwrite((void *) buf, (size_t) len, 1, fh);
 }
@@ -377,9 +378,17 @@ static void handle_conn(sem_t *sem,
 	if (-1 == sem_wait(sem))
 		goto close_fh;
 
+	/*
+	 * we "punish" the client by sending variably-sized junk, if the request is
+	 * invalid (e.g empty, another protocol, POST requests, path, traversal
+	 * attempts using relative URLs, etc')
+	 */
+
 	/* receive the request */
 	len = recv(conn, (void *) req, sizeof(req) - 1, 0);
-	if (0 >= len)
+	if (0 == len)
+		goto punish;
+	if (0 > len)
 		goto unlock;
 	req[len] = '\0';
 
@@ -418,7 +427,8 @@ static void handle_conn(sem_t *sem,
 			goto unlock;
 	}
 
-	/* disable buffering, since we use TCP_CORK */
+	/* disable buffering, since we use TCP_CORK - we don't want two layers of
+	 * buffering */
 	setbuf(fh, NULL);
 
 	if (S_ISDIR(stbuf.st_mode))
@@ -429,6 +439,7 @@ static void handle_conn(sem_t *sem,
 	if (true == res)
 		ret = EXIT_SUCCESS;
 
+	/* if we reached this point, the request is legitimate */
 	goto unlock;
 
 punish:
@@ -441,6 +452,7 @@ close_fh:
 	(void) fclose(fh);
 
 close_fd:
+	/* fclose() already called close() */
 	if (NULL == fh)
 		(void) close(conn);
 
@@ -675,6 +687,13 @@ int main(int argc, char *argv[])
 					goto close_log;
 		}
 
+		/*
+		 * from now and on, everything we do must be non-blocking, because we
+		 * want to handle signals as quick as possible
+		 */
+
+		/* the accept() call doesn't block - we know there's a pending client
+		 * because we received the asynchronous I/O signal */
 		len = sizeof(peer);
 		conn = accept(fd, &peer, &len);
 		if (-1 == conn)
@@ -709,8 +728,7 @@ int main(int argc, char *argv[])
 		                     sizeof(one)))
 			goto disconnect;
 
-		/* spawn a child process, so responding to the request does not block
-		 * the signal handling loop */
+		/* spawn a child process and respond to the request inside it */
 		pid = fork();
 		switch (pid) {
 			case (-1):
