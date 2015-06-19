@@ -89,9 +89,9 @@ static bool send_hdrs(FILE *fh,
 	if (0 == len) {
 		if (0 > fprintf(fh,
 		                "HTTP/1.1 %s\r\n" \
+		                "Connection: close\r\n" \
 		                "Date: %s\r\n" \
 		                "Content-Type: %s\r\n" \
-		                "Connection: close\r\n" \
 		                "\r\n",
 		                status,
 		                buf,
