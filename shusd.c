@@ -374,6 +374,10 @@ static void handle_conn(sem_t *sem,
 	if (NULL == fh)
 		goto close_fd;
 
+	/* disable buffering, since we use TCP_CORK - we don't want two layers of
+	 * buffering */
+	setbuf(fh, NULL);
+
 	/* lock the semaphore */
 	if (-1 == sem_wait(sem))
 		goto close_fh;
@@ -410,7 +414,9 @@ static void handle_conn(sem_t *sem,
 		goto punish;
 
 	/* do not allow relative paths in the URL */
-	if (NULL != strstr(url, "./"))
+	if (('.' == url[0]) ||
+	    (NULL != strstr(url, "./")) ||
+	    (NULL != strstr(url, "/.")))
 		goto punish;
 
 	/* get the file type and size */
@@ -426,10 +432,6 @@ static void handle_conn(sem_t *sem,
 		if (NULL == type)
 			goto unlock;
 	}
-
-	/* disable buffering, since we use TCP_CORK - we don't want two layers of
-	 * buffering */
-	setbuf(fh, NULL);
 
 	if (S_ISDIR(stbuf.st_mode))
 		res = send_index(fh, url, url);
@@ -449,12 +451,15 @@ unlock:
 	(void) sem_post(sem);
 
 close_fh:
+	(void) shutdown(conn, SHUT_RDWR);
 	(void) fclose(fh);
 
 close_fd:
 	/* fclose() already called close() */
-	if (NULL == fh)
+	if (NULL == fh) {
+		(void) shutdown(conn, SHUT_RDWR);
 		(void) close(conn);
+	}
 
 	log_req(peer, url);
 
@@ -516,9 +521,6 @@ static bool daemonize(void)
 
 	if (STDERR_FILENO != dup2(STDOUT_FILENO, STDERR_FILENO))
 		goto end;
-
-	/* set the file permissions mask */
-	(void) umask(0);
 
 	ret = true;
 
