@@ -35,6 +35,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <limits.h>
 #include <dirent.h>
 #include <time.h>
@@ -75,9 +76,8 @@ static bool get_time(char *buf, const size_t len)
 	return true;
 }
 
-__attribute__((nonnull(1, 2, 4)))
+__attribute__((nonnull(1, 3)))
 static bool send_hdrs(FILE *fh,
-                      const char *status,
                       const size_t len,
                       const char *type)
 {
@@ -88,25 +88,23 @@ static bool send_hdrs(FILE *fh,
 
 	if (0 == len) {
 		if (0 > fprintf(fh,
-		                "HTTP/1.1 %s\r\n" \
+		                "HTTP/1.1 200 OK\r\n" \
 		                "Connection: close\r\n" \
 		                "Date: %s\r\n" \
 		                "Content-Type: %s\r\n" \
 		                "\r\n",
-		                status,
 		                buf,
 		                type))
 			return false;
 	}
 	else {
 		if (0 > fprintf(fh,
-		                "HTTP/1.1 %s\r\n" \
+		                "HTTP/1.1 200 OK\r\n" \
 		                "Connection: close\r\n" \
 		                "Date: %s\r\n" \
 		                "Content-Type: %s\r\n" \
 		                "Content-Length: %zu\r\n" \
 		                "\r\n",
-		                status,
 		                buf,
 		                type,
 		                len))
@@ -126,7 +124,7 @@ static bool send_file(FILE *fh,
 	int in;
 	bool ret = false;
 
-	if (false == send_hdrs(fh, "200 OK", len, type))
+	if (false == send_hdrs(fh, len, type))
 		goto end;
 
 	if (0 == len) {
@@ -195,22 +193,24 @@ static bool send_index(FILE *fh, const char *url, const char *path)
 	if (-1 == out)
 		goto end;
 
-	if (false == send_hdrs(fh, "200 OK", 0, "text/html"))
+	if (false == send_hdrs(fh, 0, "text/html"))
 		goto end;
 
-	if (0 == strcmp("/", url)) {
-		if (0 >= fputs("<!DOCTYPE HTML>\n" \
-		               "<html>\n"
-		               "\t<head>\n"
-		               "\t\t<meta charset=\"UTF-8\">\n" \
-		               "\t\t<title>Index of /</title>\n" \
-		               "\t</head>\n" \
-		               "\t<body>\n" \
-		               "\t\t<h1>Index of /</h1>\n" \
-		               "\t\t<ul>\n",
-		               fh))
-			goto free_ents;
+	if (0 >= fprintf(fh,
+	                 "<!DOCTYPE HTML>\n" \
+	                 "<html>\n" \
+	                 "\t<head>\n" \
+	                 "\t\t<meta charset=\"UTF-8\">\n" \
+	                 "\t\t<title>Index of %s</title>\n" \
+	                 "\t</head>\n" \
+	                 "\t<body>\n" \
+	                 "\t\t<h1>Index of %s</h1>\n" \
+	                 "\t\t<ul>\n",
+	                 url,
+	                 url))
+		goto free_ents;
 
+	if (0 == strcmp("/", url)) {
 		for (i = 0; out > i; ++i) {
 			if (0 >= fprintf(fh,
 			                 "\t\t\t<li><a href=\"/%s\">%s</a></li>\n",
@@ -220,20 +220,6 @@ static bool send_index(FILE *fh, const char *url, const char *path)
 		}
 	}
 	else {
-		if (0 >= fprintf(fh,
-		                 "<!DOCTYPE HTML>\n" \
-		                 "<html>\n" \
-		                 "\t<head>\n" \
-		                 "\t\t<meta charset=\"UTF-8\">\n" \
-		                 "\t\t<title>Index of %s</title>\n" \
-		                 "\t</head>\n" \
-		                 "\t<body>\n" \
-		                 "\t\t<h1>Index of %s</h1>\n" \
-		                 "\t\t<ul>\n",
-		                 url,
-		                 url))
-			goto free_ents;
-
 		for (i = 0; out > i; ++i) {
 			if (0 >= fprintf(fh,
 			                 "\t\t\t<li><a href=\"%s/%s\">%s</a></li>\n",
