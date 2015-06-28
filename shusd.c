@@ -267,7 +267,7 @@ static void send_random(FILE *fh)
 	(void) fwrite((void *) buf, (size_t) len, 1, fh);
 }
 
-__attribute__((nonnull(1, 2)))
+__attribute__((nonnull(1)))
 static bool log_req(const struct sockaddr *peer, const char *url)
 {
 	char addr[INET6_ADDRSTRLEN];
