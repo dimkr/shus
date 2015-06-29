@@ -54,8 +54,8 @@
 #define HANDLER_MAX (128)
 #define BACKLOG (2 * HANDLER_MAX)
 #define SEMAPHORE_NAME "/shusd.sem"
-#define RECV_TIMEOUT (20)
-#define SEND_TIMEOUT (45 * 60)
+#define RECV_TIMEOUT (10)
+#define SEND_TIMEOUT (15)
 #define RAND_BUF_MIN_LEN (1024)
 #define RAND_BUF_MAX_LEN (4096)
 
