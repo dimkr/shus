@@ -342,6 +342,7 @@ static void handle_conn(sem_t *sem,
 	ssize_t len;
 	int ret = EXIT_FAILURE;
 	bool res;
+	bool body;
 
 	/* change the working directory */
 	if (-1 == chroot(root))
@@ -383,13 +384,21 @@ static void handle_conn(sem_t *sem,
 	req[len] = '\0';
 
 	/* check the request type */
-	if (0 != strncmp("GET ", req, 4))
-		goto punish;
+	if (0 == strncmp("GET ", req, 4)) {
+		len = 4;
+		body = true;
+	}
+	else {
+		if (0 != strncmp("HEAD ", req, 5))
+			goto punish;
+		len = 5;
+		body = false;
+	}
 
 	/* locate and terminate the URL */
-	if ('\0' == req[4])
+	if ('\0' == req[len])
 		goto punish;
-	url = &req[4];
+	url = &req[len];
 	pos = strchr(url, ' ');
 	if (NULL == pos)
 		goto punish;
@@ -419,13 +428,21 @@ static void handle_conn(sem_t *sem,
 			goto unlock;
 	}
 
-	if (S_ISDIR(stbuf.st_mode))
-		res = send_index(fh, url, url);
-	else
-		res = send_file(fh, (size_t) stbuf.st_size, type, url);
-
+	if (false == body) {
+		if (S_ISDIR(stbuf.st_mode))
+			res = send_hdrs(fh, 0, "text/html");
+		else
+			res = send_hdrs(fh, (size_t) stbuf.st_size, type);
+	}
+	else {
+		if (S_ISDIR(stbuf.st_mode))
+			res = send_index(fh, url, url);
+		else
+			res = send_file(fh, (size_t) stbuf.st_size, type, url);
+	}
 	if (true == res)
 		ret = EXIT_SUCCESS;
+
 
 	/* if we reached this point, the request is legitimate */
 	goto unlock;

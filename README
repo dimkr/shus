@@ -8,7 +8,7 @@ Overview
 ========
 
 shus is a tiny, extremely lightweight, efficient and secure HTTP server which
-supports only GET requests and static pages.
+supports only GET or HEAD requests and static pages.
 
 Credits and Legal Information
 =============================
