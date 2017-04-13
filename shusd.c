@@ -318,7 +318,7 @@ static const char *get_type(const magic_t mag, const char *url)
 			return "text/css";
 
 		if (0 == strcmp("js", ext))
-			return "text/javascript";
+			return "application/javascript";
 	}
 
 	return magic_file(mag, url);
